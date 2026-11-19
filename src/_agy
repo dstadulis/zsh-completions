@@ -1,0 +1,848 @@
+#compdef agy antigravity
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Zsh completion for Google Antigravity CLI (agy / antigravity)
+# Homepage: https://antigravity.google/docs/cli/reference
+
+_agy_bin() {
+  local cmd="${(Q)words[1]:-agy}"
+  if [[ "$cmd" == */* && -x "$cmd" ]]; then
+    print -r -- "$cmd"
+  elif (( $+commands[$cmd] )); then
+    print -r -- "${commands[$cmd]}"
+  elif (( $+commands[agy] )); then
+    print -r -- "${commands[agy]}"
+  elif (( $+commands[antigravity] )); then
+    print -r -- "${commands[antigravity]}"
+  else
+    print -r -- "agy"
+  fi
+}
+
+_agy_cache_dir() {
+  local dir=""
+  zstyle -s ":completion:${curcontext}:" cache-path dir 2>/dev/null || true
+  if [[ -z "$dir" ]]; then
+    dir="${ZSH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/agy}"
+  fi
+  [[ -d "$dir" ]] || command mkdir -p "$dir" 2>/dev/null
+  print -r -- "$dir"
+}
+
+# Refresh dynamic CLI help cache only when the underlying binary changes.
+_agy_refresh_help_cache() {
+  emulate -L zsh
+  setopt localoptions extendedglob
+
+  local bin="$1" cache_file="$2"
+  [[ -x "$bin" ]] || return 1
+
+  local real_bin="${bin:A}"
+  local -A st
+  local mtime="0"
+  if zmodload -F zsh/stat b:zstat 2>/dev/null && zstat -H st -- "$real_bin" 2>/dev/null; then
+    mtime="${st[mtime]:-0}:${st[size]:-0}"
+  fi
+  local stamp="# stamp: ${real_bin}:${mtime}"
+
+  if [[ -r "$cache_file" ]]; then
+    local first_line
+    IFS= read -r first_line < "$cache_file"
+    if [[ "$first_line" == "$stamp" ]]; then
+      return 0
+    fi
+  fi
+
+  local help_out
+  help_out="$("$bin" --help 2>&1)" || return 1
+  [[ "$help_out" == *"Usage of "* ]] || return 1
+
+  local -a out_lines=("$stamp")
+  local section="flags" line flag desc sub
+  for line in "${(@f)help_out}"; do
+    line="${line%$'\r'}"
+    if [[ "$line" == "Available subcommands:"* ]]; then
+      section="subcommands"
+      continue
+    fi
+    if [[ "$section" == "flags" ]]; then
+      if [[ "$line" =~ '^[[:space:]]+(--[A-Za-z0-9_-]+)[[:space:]]+(.*)$' ]]; then
+        flag="${match[1]}"
+        desc="${match[2]}"
+        desc="${desc//\[/(}"
+        desc="${desc//\]/)}"
+        out_lines+=("FLAG	${flag}	${desc}")
+      fi
+    elif [[ "$section" == "subcommands" ]]; then
+      if [[ "$line" =~ '^[[:space:]]+([A-Za-z0-9_-]+)[[:space:]]+(.*)$' ]]; then
+        sub="${match[1]}"
+        desc="${match[2]}"
+        out_lines+=("SUB	${sub}	${desc}")
+      fi
+    fi
+  done
+
+  local tmp_file="${cache_file}.tmp.$$"
+  if print -rl -- "${out_lines[@]}" >| "$tmp_file" 2>/dev/null; then
+    command mv -f "$tmp_file" "$cache_file" 2>/dev/null
+  else
+    command rm -f "$tmp_file" 2>/dev/null
+  fi
+}
+
+# Complete model IDs (instant baseline + non-blocking background refresh of `agy models`).
+_agy_models() {
+  local -a models
+  local -A seen
+
+  local -a builtin_models=(
+    'gemini-4-carbon-high:Gemini 4 Carbon (High)'
+    'gemini-4-carbon-medium:Gemini 4 Carbon (Medium)'
+    'gemini-4-carbon-low:Gemini 4 Carbon (Low)'
+    'gemini-4-hydrogen-xhigh:Gemini 4 Hydrogen (XHigh)'
+    'gemini-4-hydrogen-high:Gemini 4 Hydrogen (High)'
+    'gemini-4-hydrogen-medium:Gemini 4 Hydrogen (Medium)'
+    'gemini-4-hydrogen-low:Gemini 4 Hydrogen (Low)'
+    'gemini-4-argon-high:Gemini 4 Argon (High)'
+    'gemini-4-argon-medium:Gemini 4 Argon (Medium)'
+    'gemini-4-argon-low:Gemini 4 Argon (Low)'
+    'gemini-3.8-flash-high:Gemini 3.8 Flash (High)'
+    'gemini-3.8-flash-medium:Gemini 3.8 Flash (Medium)'
+    'gemini-3.8-flash-low:Gemini 3.8 Flash (Low)'
+    'gemini-pro-orchestrator:Orchestrator (Carbon)'
+    'gemini-pro-orchestrator-argon:Orchestrator (Argon)'
+    'claude-opus-5-5-high:Claude Opus 5.5 (High)'
+    'claude-opus-5-5-medium:Claude Opus 5.5 (Medium)'
+    'claude-opus-5-5-low:Claude Opus 5.5 (Low)'
+    'claude-sonnet-5-5-high:Claude Sonnet 5.5 (High)'
+    'claude-sonnet-5-5-medium:Claude Sonnet 5.5 (Medium)'
+    'claude-sonnet-5-5-low:Claude Sonnet 5.5 (Low)'
+    'gpt-oss-120b-medium:GPT-OSS 120B (Medium)'
+  )
+
+  local entry key
+  for entry in "${builtin_models[@]}"; do
+    key="${entry%%:*}"
+    seen[$key]=1
+    models+=("$entry")
+  done
+
+  local cache_dir="$(_agy_cache_dir)"
+  local cache_file="${cache_dir}/agy-models.cache"
+  local bin="$(_agy_bin)"
+
+  if [[ -r "$cache_file" ]]; then
+    local line id desc
+    for line in "${(@f)$(<"$cache_file")}"; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      id="${line%%	*}"
+      desc="${line#*	}"
+      [[ "$desc" == "$line" ]] && desc="Available model"
+      if [[ -n "$id" ]] && (( ! $+seen[$id] )); then
+        seen[$id]=1
+        models+=("${id//:/\\:}:${desc}")
+      fi
+    done
+  fi
+
+  # Refresh asynchronously in the background if missing or older than 24h.
+  local -a fresh_cache=("$cache_file"(Nm-1))
+  if (( ${#fresh_cache} == 0 )) && [[ -x "$bin" ]]; then
+    () {
+      emulate -L zsh
+      setopt localoptions nomonitor nonotify nobgnice extendedglob
+      (
+        local raw line in_list=0 m_id m_desc
+        local -a parsed=()
+        raw="$("$bin" models 2>&1)" || exit 0
+        for line in "${(@f)raw}"; do
+          line="${line%$'\r'}"
+          if [[ "$line" == "Available models:"* ]]; then
+            in_list=1
+            continue
+          fi
+          (( in_list )) || continue
+          line="${line#"${line%%[![:space:]]*}"}"
+          line="${line%"${line##*[![:space:]]}"}"
+          [[ -z "$line" || "$line" == (Error:|E[0-9][0-9][0-9][0-9]|I[0-9][0-9][0-9][0-9])* ]] && continue
+          if [[ "$line" =~ '^([A-Za-z0-9._@-]+)[[:space:]]+[-—:(]*(.*)$' ]]; then
+            m_id="${match[1]}"
+            m_desc="${match[2]%\)}"
+            parsed+=("${m_id}	${m_desc:-Available model}")
+          elif [[ "$line" =~ '^([A-Za-z0-9._@-]+)$' ]]; then
+            parsed+=("${match[1]}	Available model")
+          fi
+        done
+        if (( ${#parsed} > 0 )); then
+          local tmp="${cache_file}.tmp.$$"
+          print -rl -- "${parsed[@]}" >| "$tmp" 2>/dev/null && command mv -f "$tmp" "$cache_file" 2>/dev/null
+        fi
+      ) >/dev/null 2>&1 &!
+    } 2>/dev/null
+  fi
+
+  _describe -t models 'model' models
+}
+
+# Extract YAML frontmatter name/description from an agent markdown file.
+_agy_parse_agent_md() {
+  emulate -L zsh
+  local file="$1"
+  [[ -r "$file" ]] || return 1
+
+  local a_name="${file:t:r}" a_desc="" line i=0 in_fm=0
+  while (( i < 25 )) && IFS= read -r line; do
+    (( i++ ))
+    line="${line%$'\r'}"
+    if (( i == 1 )); then
+      [[ "$line" == "---" ]] || break
+      in_fm=1
+      continue
+    fi
+    [[ "$line" == "---" ]] && break
+    if (( in_fm )); then
+      if [[ "$line" =~ '^name:[[:space:]]*["'\'']?([^"'\'']+)["'\'']?[[:space:]]*$' ]]; then
+        a_name="${match[1]}"
+      elif [[ "$line" =~ '^description:[[:space:]]*["'\'']?([^"'\''>|-].*)["'\'']?[[:space:]]*$' ]]; then
+        a_desc="${match[1]}"
+      fi
+    fi
+  done < "$file"
+
+  REPLY="${a_name//:/\\:}:${a_desc:-Custom agent}"
+}
+
+# Complete available session/ACP agents (built-in + workspace + global + cached).
+_agy_agents() {
+  local -a agents
+  local -A seen
+
+  local -a builtin_agents=(
+    'self:Default agent inheriting full session configuration'
+    'research:Read-only codebase exploration and research agent'
+    'image-generator:Image generation and editing agent'
+  )
+
+  local entry key REPLY
+  for entry in "${builtin_agents[@]}"; do
+    key="${entry%%:*}"
+    seen[$key]=1
+    agents+=("$entry")
+  done
+
+  () {
+    emulate -L zsh
+    setopt localoptions extendedglob nullglob
+
+    local dir="$PWD" f
+    local -a md_files=()
+    while true; do
+      md_files+=(
+        "$dir"/(.agents|.agent|_agents|_agent)/agents/*.md(.N)
+        "$dir"/(.agents|.agent|_agents|_agent)/plugins/*/agents/*.md(.N)
+        "$dir"/.claude/agents/*.md(.N)
+      )
+      [[ "$dir" == "/" || -z "$dir" ]] && break
+      dir="${dir:h}"
+    done
+
+    md_files+=(
+      "$HOME/.gemini/config/agents/"*.md(.N)
+      "$HOME/.gemini/config/plugins/"*/agents/*.md(.N)
+      "$HOME/.gemini/agents/"*.md(.N)
+    )
+
+    for f in "${md_files[@]}"; do
+      if _agy_parse_agent_md "$f"; then
+        key="${REPLY%%:*}"
+        if (( ! $+seen[$key] )); then
+          seen[$key]=1
+          agents+=("$REPLY")
+        fi
+      fi
+    done
+  }
+
+  local cache_dir="$(_agy_cache_dir)"
+  local cache_file="${cache_dir}/agy-agents.cache"
+  local bin="$(_agy_bin)"
+
+  if [[ -r "$cache_file" ]]; then
+    local line
+    for line in "${(@f)$(<"$cache_file")}"; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      if (( ! $+seen[$line] )); then
+        seen[$line]=1
+        agents+=("${line//:/\\:}:Custom agent")
+      fi
+    done
+  fi
+
+  local -a fresh_cache=("$cache_file"(Nm-1))
+  if (( ${#fresh_cache} == 0 )) && [[ -x "$bin" ]]; then
+    () {
+      emulate -L zsh
+      setopt localoptions nomonitor nonotify nobgnice
+      (
+        local raw line in_list=0
+        local -a parsed=()
+        raw="$("$bin" agents 2>&1)" || exit 0
+        for line in "${(@f)raw}"; do
+          line="${line%$'\r'}"
+          if [[ "$line" == "Available agents:"* ]]; then
+            in_list=1
+            continue
+          fi
+          (( in_list )) || continue
+          line="${line#"${line%%[![:space:]]*}"}"
+          line="${line%"${line##*[![:space:]]}"}"
+          [[ -n "$line" && "$line" != (Error:|E[0-9][0-9][0-9][0-9]|I[0-9][0-9][0-9][0-9])* ]] && parsed+=("$line")
+        done
+        local tmp="${cache_file}.tmp.$$"
+        print -rl -- "# agents" "${parsed[@]}" >| "$tmp" 2>/dev/null && command mv -f "$tmp" "$cache_file" 2>/dev/null
+      ) >/dev/null 2>&1 &!
+    } 2>/dev/null
+  fi
+
+  _describe -t agents 'agent' agents
+}
+
+# Complete recent conversation IDs from ~/.gemini/antigravity-cli/brain (newest first).
+_agy_conversations() {
+  local brain_dir="$HOME/.gemini/antigravity-cli/brain"
+  [[ -d "$brain_dir" ]] || return 1
+
+  local -a convs=() dirs=()
+  () {
+    emulate -L zsh
+    setopt localoptions extendedglob nullglob
+
+    local -A seen_dirs
+    local -a pref_dirs=() recent_dirs=()
+    if [[ -n "$PREFIX" ]]; then
+      pref_dirs=("$brain_dir/${PREFIX}"*(-/Nom[1,60]))
+    fi
+    recent_dirs=("$brain_dir/"*(-/Nom[1,60]))
+
+    local d
+    for d in "${pref_dirs[@]}" "${recent_dirs[@]}"; do
+      if (( ! $+seen_dirs[$d] )); then
+        seen_dirs[$d]=1
+        dirs+=("$d")
+      fi
+    done
+  }
+  (( ${#dirs} )) || return 1
+
+  local has_stat=0 has_dt=0
+  zmodload -F zsh/stat b:zstat 2>/dev/null && has_stat=1
+  zmodload zsh/datetime 2>/dev/null && has_dt=1
+
+  local d id ts label
+  local -A st
+  for d in "${dirs[@]}"; do
+    id="${d:t}"
+    [[ "$id" == .* ]] && continue
+    label="Conversation"
+    if (( has_stat && has_dt )) && zstat -H st -- "$d" 2>/dev/null; then
+      strftime -s ts '%Y-%m-%d %H:%M' "${st[mtime]}" 2>/dev/null && label="Last active ${ts}"
+    fi
+    convs+=("${id//:/\\:}:${label}")
+  done
+
+  (( ${#convs} )) && _describe -V -t conversations 'conversation ID' convs
+}
+
+# Complete configured MCP server names via `agy mcp list`.
+_agy_mcp_servers() {
+  local want_status="${1:-all}"
+  local bin="$(_agy_bin)"
+  local out
+  out="$("$bin" mcp list 2>/dev/null)" || return 1
+
+  local -a preferred fallback
+  local line name mtype mstatus rest
+  for line in "${(@f)out}"; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" == NAME[[:space:]]* || "$line" == "No "* ]] && continue
+    if [[ "$line" =~ '^([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$' ]]; then
+      name="${match[1]}"
+      mtype="${match[2]}"
+      mstatus="${match[3]}"
+      rest="${match[4]}"
+      local spec="${name//:/\\:}:${mtype} (${mstatus}) — ${rest}"
+      fallback+=("$spec")
+      if [[ "$want_status" == "all" || "$mstatus" == "$want_status" ]]; then
+        preferred+=("$spec")
+      fi
+    fi
+  done
+
+  if (( ${#preferred} )); then
+    _describe -t mcp-servers 'MCP server' preferred
+  elif (( ${#fallback} )); then
+    _describe -t mcp-servers 'MCP server' fallback
+  else
+    return 1
+  fi
+}
+
+# Complete `<commandOrUrl> [args...]` for `agy mcp add`.
+_agy_mcp_cmd_or_args() {
+  if (( CURRENT == 1 )); then
+    _alternative \
+      'commands:executable:_command_names -e' \
+      'urls:HTTP URL:_urls'
+  else
+    _normal
+  fi
+}
+
+# Complete installed plugin names via `agy plugin list` (with filesystem fallback).
+_agy_plugins() {
+  local want_status="${1:-all}"
+  local bin="$(_agy_bin)"
+  local out
+  out="$("$bin" plugin list 2>/dev/null)"
+
+  local -a preferred fallback
+  local line name pstatus
+  for line in "${(@f)out}"; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ '^-[[:space:]]+([^[:space:]]+)[[:space:]]+\(([^)]+)\)' ]]; then
+      name="${match[1]}"
+      pstatus="${match[2]}"
+      local spec="${name//:/\\:}:${pstatus} plugin"
+      fallback+=("$spec")
+      if [[ "$want_status" == "all" || "$pstatus" == "$want_status" ]]; then
+        preferred+=("$spec")
+      fi
+    fi
+  done
+
+  if (( ${#fallback} == 0 )); then
+    local -a dirs=("$HOME/.gemini/config/plugins/"*(/N:t))
+    for name in "${dirs[@]}"; do
+      preferred+=("${name//:/\\:}:installed plugin")
+    done
+  fi
+
+  if (( ${#preferred} )); then
+    _describe -t plugins 'plugin' preferred
+  elif (( ${#fallback} )); then
+    _describe -t plugins 'plugin' fallback
+  else
+    return 1
+  fi
+}
+
+_agy_plugin_import_target() {
+  local -a sources=(
+    'gemini:Import plugins from Gemini CLI'
+    'claude:Import plugins from Claude Code'
+  )
+  _describe -t sources 'import source' sources
+  _directories
+}
+
+_agy_mic_serve_addr() {
+  local -a addrs=(
+    '127.0.0.1\:4713:Default loopback address and port'
+  )
+  _describe -t addresses 'listen address' addrs
+}
+
+_agy_acp() {
+  local -a args
+  args=(
+    '*--add-dir=[Add a directory to the workspace (repeatable)]:directory:_directories'
+    '(--agent)--agent=[Agent for the ACP session]:agent:_agy_agents'
+    '(--app-data-dir --app_data_dir)--app-data-dir=[Path where application data is stored]:directory:_directories'
+    '!--app_data_dir=[Path where application data is stored]:directory:_directories'
+    '(--dangerously-skip-permissions)--dangerously-skip-permissions[Auto-approve all tool permission requests]'
+    '(--disable-telemetry --disable_telemetry)--disable-telemetry[Disable telemetry]'
+    '!--disable_telemetry[Disable telemetry]'
+    '(--gemini-dir --gemini_dir)--gemini-dir=[Path where Gemini files are stored]:directory:_directories'
+    '!--gemini_dir=[Path where Gemini files are stored]:directory:_directories'
+    '(: * -)'{-h,--help}'[Show help]'
+    '(--ide-mcp-port --ide_mcp_port)--ide-mcp-port=[Port for host IDE tools MCP server]:port:'
+    '!--ide_mcp_port=[Port for host IDE tools MCP server]:port:'
+    '(--include-default-customizations)--include-default-customizations[Include default customizations]'
+    '!--is_google_internal[Deprecated: use --is_google3_workspace]'
+    '(--log-file --cli_log_file)--log-file=[Override ACP log file path]:log file:_files'
+    '(--login)--login[Log in with Google interactively, then exit]'
+    '(--process-per-session)--process-per-session[Serve each session from an isolated worker process]'
+    '(--sandbox)--sandbox[Run in a sandbox with terminal restrictions enabled]'
+    '(--stdio)--stdio[Use stdio JSON-RPC transport (default)]'
+  )
+
+  # Expose non-duplicate internal ACP flags when typed or when complete-all is set.
+  if [[ "$PREFIX$SUFFIX" == --(*_*|worker*) ]] || zstyle -t ":completion:${curcontext}:" complete-all; then
+    args+=(
+      '(--cli_dir_name)--cli_dir_name=[Subdirectory under app_data_dir for CLI settings and logs]:directory name:'
+      '(--log-file --cli_log_file)--cli_log_file=[Override ACP log file path]:log file:_files'
+      '(--cloud_code_endpoint)--cloud_code_endpoint=[CCPA API URL]:URL:_urls'
+      '(--is_google3_workspace --is_google_internal)--is_google3_workspace[Whether running in Google environment]'
+      '(--override_user_agent_name)--override_user_agent_name=[Override user agent name for HTTP requests]:user agent:'
+      '(--use_stubby_auth)--use_stubby_auth[Use LOAS auth]'
+      '(--worker)--worker[Serve a single session for an ACP front process (internal)]'
+    )
+  fi
+
+  _arguments -S : "${args[@]}"
+}
+
+_agy_mcp() {
+  local context state state_descr line
+  typeset -A opt_args
+  local ret=1
+
+  local -a mcp_subcommands=(
+    'add:Add or update an MCP server configuration'
+    'remove:Remove an MCP server configuration'
+    'list:List all configured MCP servers'
+    'enable:Enable an MCP server'
+    'disable:Disable an MCP server'
+  )
+
+  _arguments -S -C : \
+    '(-h --help : * -)'{-h,--help}'[Show help]' \
+    '1:mcp subcommand:->subcmd' \
+    '*::arg:->args' && ret=0
+
+  case "$state" in
+    subcmd)
+      _describe -t subcommands 'mcp subcommand' mcp_subcommands && ret=0
+      ;;
+    args)
+      curcontext="${curcontext%:*:*}:agy-mcp-${line[1]}:"
+      case "${line[1]}" in
+        add)
+          # Flags must precede <name> in `agy mcp add`.
+          _arguments -S -A "-*" : \
+            '*-H=[HTTP header "Key: Value" (repeatable)]:HTTP header:' \
+            '*--header=[HTTP header "Key: Value" (repeatable)]:HTTP header:' \
+            '*-e=[Environment variable KEY=value (repeatable)]:KEY=value:' \
+            '*--env=[Environment variable KEY=value (repeatable)]:KEY=value:' \
+            '(-t --type)'{-t,--type}'=[MCP server transport type]:server type:((
+              stdio\:"Local stdio executable server (default)"
+              http\:"Remote Streamable HTTP server"
+            ))' \
+            '(: * -)'{-h,--help}'[Show help]' \
+            '1:server name:' \
+            '*:::command or URL:_agy_mcp_cmd_or_args' && ret=0
+          ;;
+        remove)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' \
+            '1:MCP server:_agy_mcp_servers all' && ret=0
+          ;;
+        list)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+        enable)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' \
+            '1:MCP server:_agy_mcp_servers disabled' && ret=0
+          ;;
+        disable)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' \
+            '1:MCP server:_agy_mcp_servers enabled' && ret=0
+          ;;
+      esac
+      ;;
+  esac
+
+  return ret
+}
+
+_agy_plugin() {
+  local context state state_descr line
+  typeset -A opt_args
+  local ret=1
+
+  local -a plugin_subcommands=(
+    'list:List installed plugins'
+    'import:Import plugins from gemini, claude, or a directory'
+    'install:Install a plugin directory or plugin@marketplace target'
+    'uninstall:Uninstall an installed plugin'
+    'enable:Enable an installed plugin'
+    'disable:Disable an installed plugin'
+    'validate:Validate a plugin manifest and directory structure'
+    'link:Generate a link to a plugin marketplace'
+    'help:Show plugin command help'
+  )
+
+  _arguments -S -C : \
+    '(-h --help : * -)'{-h,--help}'[Show help]' \
+    '1:plugin command:->subcmd' \
+    '*::arg:->args' && ret=0
+
+  case "$state" in
+    subcmd)
+      _describe -t subcommands 'plugin command' plugin_subcommands && ret=0
+      ;;
+    args)
+      curcontext="${curcontext%:*:*}:agy-plugin-${line[1]}:"
+      case "${line[1]}" in
+        list)
+          _arguments -S : \
+            '(--json)--json[Output installed plugins as JSON]' && ret=0
+          ;;
+        import)
+          _arguments -S : \
+            '1:import source or path:_agy_plugin_import_target' && ret=0
+          ;;
+        install)
+          _arguments -S : \
+            '1:plugin directory or target:_directories' && ret=0
+          ;;
+        uninstall)
+          _arguments -S : \
+            '1:installed plugin:_agy_plugins all' && ret=0
+          ;;
+        enable)
+          _arguments -S : \
+            '1:installed plugin:_agy_plugins disabled' && ret=0
+          ;;
+        disable)
+          _arguments -S : \
+            '1:installed plugin:_agy_plugins enabled' && ret=0
+          ;;
+        validate)
+          _arguments -S : \
+            '(--strict)--strict[Also fail on warnings]' \
+            '(--json)--json[Print validation report as JSON]' \
+            '(: * -)'{-h,--help}'[Show help]' \
+            '1:plugin directory or plugin.json:_files' && ret=0
+          ;;
+        link)
+          _arguments -S : \
+            '1:marketplace name:' \
+            '2:target directory:_directories' && ret=0
+          ;;
+        help)
+          _message 'no arguments' && ret=0
+          ;;
+      esac
+      ;;
+  esac
+
+  return ret
+}
+
+_agy_remote_control() {
+  local context state state_descr line
+  typeset -A opt_args
+  local ret=1
+
+  local -a rc_subcommands=(
+    'start:Register and start the remote-control daemon'
+    'status:Show the remote-control daemon status'
+    'stop:Stop the daemon and unregister it'
+  )
+
+  _arguments -S -C : \
+    '(-h --help : * -)'{-h,--help}'[Show help]' \
+    '1:remote-control subcommand:->subcmd' \
+    '*::arg:->args' && ret=0
+
+  case "$state" in
+    subcmd)
+      _describe -t subcommands 'remote-control subcommand' rc_subcommands && ret=0
+      ;;
+    args)
+      curcontext="${curcontext%:*:*}:agy-remote-control-${line[1]}:"
+      case "${line[1]}" in
+        start)
+          _arguments -S : \
+            '(--name)--name=[Set instance name shown in Remote Control]:instance name:' \
+            '(--session)--session[Register daemon login-scoped (stops at logout)]' \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+        status|stop)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+      esac
+      ;;
+  esac
+
+  return ret
+}
+
+_agy() {
+  local context state state_descr line
+  typeset -A opt_args
+  local ret=1
+
+  local -a subcommands=(
+    'acp:Start the Agent Client Protocol (ACP) stdio server'
+    'agent:List available agents'
+    'agents:List available agents'
+    'changelog:Show changelog and release notes'
+    'help:Show help for subcommands'
+    'install:Configure environment paths and shell settings'
+    'mcp:Manage MCP servers (add, remove, list, enable, disable)'
+    'mic-serve:Serve this machine'\''s microphone to a CLI on another host'
+    'models:List available models'
+    'plugin:Manage plugins (install, uninstall, list, enable, disable)'
+    'plugins:Manage plugins (alias for plugin)'
+    'remote-control:Manage the remote-control background daemon'
+    'update:Update CLI'
+  )
+
+  local -a main_opts=(
+    '(1)*--add-dir=[Add a directory to the workspace (repeatable)]:directory:_directories'
+    '(1 --agent)--agent=[Agent for the current CLI session]:agent:_agy_agents'
+    '(1 -c --continue --conversation --new-project)'{-c,--continue}'[Continue the most recent conversation]'
+    '(1 -c --continue --conversation --new-project)--conversation=[Resume a previous conversation by ID]:conversation ID:_agy_conversations'
+    '(--dangerously-skip-permissions)--dangerously-skip-permissions[Auto-approve all tool permission requests without prompting]'
+    '(1 --disable-slash-commands)--disable-slash-commands[Disable slash command and skill expansion in print mode]'
+    '(1 --effort)--effort=[Reasoning effort for the current CLI session]:effort:((
+      low\:"Fastest responses with minimal thinking"
+      medium\:"Balanced speed and reasoning"
+      high\:"Deep reasoning for complex tasks"
+      xhigh\:"Extended reasoning effort"
+      max\:"Maximum reasoning depth"
+    ))'
+    '(: * -)'{-h,--help}'[Show help]'
+    '(1 -i --prompt-interactive -p --print --prompt)'{-i,--prompt-interactive}'=[Run an initial prompt interactively and continue the session]:prompt:'
+    '(1 --input-format)--input-format=[Input format for print mode]:input format:((
+      text\:"Plain text prompt input (default)"
+      stream-json\:"Read one NDJSON message per line from stdin (requires --output-format stream-json)"
+    ))'
+    '(1 --json-schema)--json-schema=[JSON schema string or path to schema file for structured output]:JSON schema or file:_files'
+    '(--log-file)--log-file=[Override CLI log file path]:log file:_files'
+    '(1 --mode)--mode=[Set the agent execution mode for this session]:execution mode:((
+      accept-edits\:"Automatically accept file edits"
+      auto\:"Autonomous execution mode"
+      plan\:"Plan before making changes"
+    ))'
+    '(1 --model)--model=[Model for the current CLI session]:model:_agy_models'
+    '(1 -c --continue --conversation --new-project)--new-project[Create a new project for this session]'
+    '(1 --output-format)--output-format=[Output format for print mode]:output format:((
+      text\:"Human-readable plain text output (default)"
+      json\:"Structured JSON result object"
+      stream-json\:"Streaming NDJSON events"
+    ))'
+    '(1 -p --print --prompt -i --prompt-interactive)'{-p,--print,--prompt}'=[Run a single prompt non-interactively and print the response]:prompt:'
+    '(1 --print-timeout)--print-timeout=[Time limit for print mode (0s waits until turn completes)]:duration:((
+      0s\:"Wait until the turn completes (default)"
+      30s\:"30 second timeout"
+      1m\:"1 minute timeout"
+      5m\:"5 minute timeout"
+      10m\:"10 minute timeout"
+      30m\:"30 minute timeout"
+      1h\:"1 hour timeout"
+    ))'
+    '(1 --project)--project=[Project ID or project name for the current CLI session]:project ID or name:'
+    '(1 --remote-agent)--remote-agent[Run conversations using remote agents]'
+    '(1 --remote-control)--remote-control[Create a remote connection for the CLI session on start up]'
+    '(--sandbox)--sandbox[Run in a sandbox with terminal restrictions enabled]'
+    '(1 --settings)--settings=[Session-only settings JSON object or path to settings file]:settings JSON or file:_files'
+    '(: * -)--version[Show CLI version]'
+  )
+
+  # Merge any newly introduced flags or subcommands from `agy --help` (cached by binary mtime).
+  local -A known_flags=(
+    [--add-dir]=1 [--agent]=1 [--continue]=1 [--conversation]=1
+    [--dangerously-skip-permissions]=1 [--disable-slash-commands]=1
+    [--effort]=1 [--help]=1 [--input-format]=1 [--json-schema]=1
+    [--log-file]=1 [--mode]=1 [--model]=1 [--new-project]=1
+    [--output-format]=1 [--print]=1 [--print-timeout]=1 [--project]=1
+    [--prompt]=1 [--prompt-interactive]=1 [--remote-agent]=1
+    [--remote-control]=1 [--sandbox]=1 [--settings]=1 [--version]=1
+  )
+  local -A known_subs=(
+    [acp]=1 [agent]=1 [agents]=1 [changelog]=1 [help]=1 [install]=1
+    [mcp]=1 [mic-serve]=1 [models]=1 [plugin]=1 [plugins]=1
+    [remote-control]=1 [update]=1
+  )
+
+  local bin="$(_agy_bin)"
+  local cache_file="$(_agy_cache_dir)/agy-help.cache"
+  if _agy_refresh_help_cache "$bin" "$cache_file" && [[ -r "$cache_file" ]]; then
+    local cline kind item desc
+    for cline in "${(@f)$(<"$cache_file")}"; do
+      [[ "$cline" == \#* || -z "$cline" ]] && continue
+      kind="${cline%%	*}"
+      cline="${cline#*	}"
+      item="${cline%%	*}"
+      desc="${cline#*	}"
+      if [[ "$kind" == "FLAG" ]] && (( ! $+known_flags[$item] )); then
+        known_flags[$item]=1
+        main_opts+=("(${item})${item}[${desc}]")
+      elif [[ "$kind" == "SUB" ]] && (( ! $+known_subs[$item] )); then
+        known_subs[$item]=1
+        subcommands+=("${item//:/\\:}:${desc}")
+      fi
+    done
+  fi
+
+  _arguments -S -C : \
+    "${main_opts[@]}" \
+    '1:subcommand:->subcmd' \
+    '*::arg:->args' && ret=0
+
+  case "$state" in
+    subcmd)
+      _describe -t subcommands 'subcommand' subcommands && ret=0
+      ;;
+    args)
+      curcontext="${curcontext%:*:*}:agy-${line[1]}:"
+      case "${line[1]}" in
+        acp)
+          _agy_acp && ret=0
+          ;;
+        agent|agents|changelog|models)
+          _arguments -S : \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+        help)
+          local -a help_targets=("${subcommands[@]:#help:*}")
+          _arguments -S : \
+            '1:subcommand:->help_target' && ret=0
+          if [[ "$state" == "help_target" ]]; then
+            _describe -t subcommands 'subcommand' help_targets && ret=0
+          fi
+          ;;
+        install)
+          _arguments -S : \
+            '(--dir)--dir=[Custom directory target to configure PATH for]:directory:_directories' \
+            '(--skip-aliases)--skip-aliases[Bypass shell profile alias purging]' \
+            '(--skip-path)--skip-path[Bypass shell profile PATH appending]' \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+        mcp)
+          _agy_mcp && ret=0
+          ;;
+        mic-serve)
+          _arguments -S : \
+            '(--addr)--addr=[Loopback address to listen on]:listen address:_agy_mic_serve_addr' \
+            '(: * -)'{-h,--help}'[Show help]' && ret=0
+          ;;
+        plugin|plugins)
+          _agy_plugin && ret=0
+          ;;
+        remote-control)
+          _agy_remote_control && ret=0
+          ;;
+        update)
+          _arguments -S : \
+            '(: * -)--help[Show help]' && ret=0
+          ;;
+      esac
+      ;;
+  esac
+
+  return ret
+}
+
+if (( $+words )); then
+  _agy "$@"
+elif (( $+functions[compdef] )); then
+  compdef _agy agy antigravity
+fi
